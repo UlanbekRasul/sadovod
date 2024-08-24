@@ -1,4 +1,5 @@
 import time
+from aiogram.types import ContentType
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -12,6 +13,10 @@ API_TOKEN = '7129169272:AAFdC8hln0Vl2Lz3wShSL4lf59PtZYkVJac'
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
+
+# Добавляем новое состояние для фотоотчета
+class PhotoReport(StatesGroup):
+    waiting_for_photo = State()
 
 
 # State management classes for various user flows
@@ -466,37 +471,63 @@ async def all_tasks_done(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     brigade = data['chosen_brigade'].split("_")[1]
     day = data['chosen_day']
-    message = f"Бригада {brigade}, {day}, выполнила все задания."
-    await bot.send_message(manager_chat_id, message)
-    await call.message.answer("Информация отправлена менеджеру.", reply_markup=get_main_menu_keyboard())
-    await state.finish()
+
+    # Запрашиваем у пользователя отправку фотоотчета
+    await PhotoReport.waiting_for_photo.set()
+    await call.message.answer("Отправьте фотоотчет о выполненных заданиях.")
+
+    # Сохраняем в состоянии информацию о бригаде и дне
+    await state.update_data(report_message=f"Бригада {brigade}, {day}, выполнила все задания.")
 
 
 # Если сотрудник отметил, что не все задания выполнены
 @dp.callback_query_handler(text="not_all_done", state=EmployeeActions.marking_tasks)
-async def not_all_tasks_done(call: types.CallbackQuery):
+async def not_all_tasks_done(call: types.CallbackQuery, state: FSMContext):
     await EmployeeActions.entering_uncompleted_tasks.set()
     await call.message.answer("Какие задания не были выполнены? Введите ниже одним сообщением.")
-    return enter_uncompleted_tasks
 
 
+# После отправки текстового отчета о невыполненных заданиях
 @dp.message_handler(state=EmployeeActions.entering_uncompleted_tasks)
 async def enter_uncompleted_tasks(message: types.Message, state: FSMContext):
     uncompleted_tasks = message.text
     data = await state.get_data()
 
-    # Здесь добавляем проверку на наличие ключа 'chosen_day' в data
     if 'chosen_day' not in data:
         await message.answer("Произошла ошибка: день не был выбран. Пожалуйста, начните процесс заново.")
-        await state.finish()  # Очищаем состояние, чтобы пользователь мог начать заново
+        await state.finish()
         return
 
     brigade = data['chosen_brigade'].split("_")[1]
     day = data['chosen_day']
-    message_to_manager = f"Бригада {brigade}, {day}, выполнила все задания кроме: {uncompleted_tasks}"
-    await bot.send_message(manager_chat_id, message_to_manager)
-    await message.answer("Информация отправлена менеджеру.", reply_markup=get_main_menu_keyboard())
+
+    # Запрашиваем у пользователя отправку фотоотчета
+    await PhotoReport.waiting_for_photo.set()
+    await message.answer("Отправьте фотоотчет о выполнении заданий.")
+
+    # Сохраняем в состоянии информацию о бригаде, дне и невыполненных задачах
+    await state.update_data(report_message=f"Бригада {brigade}, {day}, выполнила все задания кроме: {uncompleted_tasks}")
+
+# Обработка получения фотоотчета
+@dp.message_handler(content_types=[ContentType.PHOTO], state=PhotoReport.waiting_for_photo)
+async def handle_photo_report(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    report_message = data.get('report_message')
+    photo = message.photo[-1]  # Выбираем фото с наибольшим разрешением
+
+    # Отправляем текстовый отчет и фото администратору
+    await bot.send_message(manager_chat_id, report_message)
+    await bot.send_photo(manager_chat_id, photo.file_id)
+
+    # Завершаем процесс и возвращаем пользователя в главное меню
+    await message.answer("Фотоотчет отправлен менеджеру.", reply_markup=get_main_menu_keyboard())
     await state.finish()
+
+# Если пользователь не отправил фото, но отправил другое сообщение
+@dp.message_handler(state=PhotoReport.waiting_for_photo)
+async def handle_invalid_photo_report(message: types.Message):
+    await message.answer("Пожалуйста, отправьте фотографию в качестве фотоотчета.")
+
 
 def main():
     while True:
